@@ -1,0 +1,15 @@
+[package]
+name = "xppen-profiles"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4", features = ["derive"] }
+eframe = "0.31"
+evdev = "0.13"
+libc = "0.2.190"
+roxmltree = "0.21.1"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "0.8"
+zbus = "5"
