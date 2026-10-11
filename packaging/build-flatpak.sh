@@ -41,6 +41,8 @@ flatpak build-finish "$WORK/build" \
     --filesystem=xdg-data/applications:ro --filesystem=xdg-data/icons:ro \
     --filesystem=xdg-data/flatpak/exports:ro --filesystem=/var/lib/flatpak/exports:ro
 
-flatpak build-export "$WORK/repo" "$WORK/build" >/dev/null
+# The icon check runs in a sandbox of its own, which containers and CI runners often forbid;
+# the icon is ours, so it is checked without one.
+flatpak build-export --disable-sandbox "$WORK/repo" "$WORK/build" >/dev/null
 flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo "$WORK/repo" "$OUT" "$APP"
 echo "built $OUT"
