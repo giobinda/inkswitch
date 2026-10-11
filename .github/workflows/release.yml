@@ -36,7 +36,15 @@ jobs:
         run: packaging/build-appimage.sh
 
       - name: Build the Flatpak
-        run: packaging/build-flatpak.sh
+        run: |
+          # On failure, repeat the end of the output as an error annotation, which can be read
+          # from the run's summary without opening the full log.
+          if ! sh -x packaging/build-flatpak.sh > flatpak.log 2>&1; then
+            cat flatpak.log
+            echo "::error title=Flatpak build::$(tail -n 25 flatpak.log | sed -e 's/%/%25/g' | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g')"
+            exit 1
+          fi
+          tail -n 3 flatpak.log
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
