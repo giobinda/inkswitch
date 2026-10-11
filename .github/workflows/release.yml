@@ -23,7 +23,9 @@ jobs:
           pipx install ziglang
           pipx install cargo-zigbuild
           # pipx names the compiler python-zig; cargo-zigbuild looks for zig.
-          ln -s "$(command -v python-zig)" "$HOME/.local/bin/zig"
+          # The link goes next to it, wherever pipx puts its programs on this runner.
+          ln -s python-zig "$(dirname "$(command -v python-zig)")/zig"
+          zig version
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y --noninteractive flathub org.freedesktop.Platform//25.08
 
