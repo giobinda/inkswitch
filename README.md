@@ -39,16 +39,21 @@ Inkswitch is an independent project. It is not made, endorsed or supported by XP
 - **KDE Plasma 6 on Wayland** for automatic profile switching and for choosing the pen's screen.
   On other desktops the driver runs, and you pick the profile by hand.
 - systemd, to run the driver in the background (not needed for the Flatpak).
-- The official XP-Pen driver must not be running at the same time: both would claim the tablet.
+- The official XP-Pen driver does not need to be installed. If it is, it must not be running at
+  the same time: both would claim the tablet.
+
+GNOME and other desktops have not been tested yet.
 
 ## Installing
 
-There are no published releases yet; build one of the packages below, or install from source.
+Download the AppImage or the Flatpak bundle from the
+[latest release](https://github.com/giobinda/inkswitch/releases/latest), or build them yourself
+as shown below.
 
 ### AppImage
 
 ```sh
-packaging/build-appimage.sh          # writes dist/Inkswitch-x86_64.AppImage
+packaging/build-appimage.sh          # only if you build it yourself: writes it to dist/
 chmod +x Inkswitch-x86_64.AppImage
 ./Inkswitch-x86_64.AppImage
 ```
@@ -60,7 +65,7 @@ password, the rule that lets you use the tablet without being root.
 ### Flatpak
 
 ```sh
-packaging/build-flatpak.sh           # writes dist/Inkswitch.flatpak
+packaging/build-flatpak.sh           # only if you build it yourself: writes it to dist/
 flatpak install --user Inkswitch.flatpak
 ```
 

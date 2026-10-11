@@ -1,0 +1,43 @@
+# Builds the AppImage and the Flatpak bundle and attaches them to a GitHub release
+# whenever a version tag (v1.2.3) is pushed.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak libxkbcommon0 xkb-data
+          # Lets the binary be linked against an old glibc, see packaging/build-binary.sh.
+          pipx install ziglang
+          pipx install cargo-zigbuild
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.freedesktop.Platform//25.08
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build the AppImage
+        run: packaging/build-appimage.sh
+
+      - name: Build the Flatpak
+        run: packaging/build-flatpak.sh
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Inkswitch-x86_64.AppImage
+            dist/Inkswitch.flatpak
+          generate_release_notes: true
