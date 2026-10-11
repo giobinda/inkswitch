@@ -22,6 +22,8 @@ jobs:
           # Lets the binary be linked against an old glibc, see packaging/build-binary.sh.
           pipx install ziglang
           pipx install cargo-zigbuild
+          # pipx names the compiler python-zig; cargo-zigbuild looks for zig.
+          ln -s "$(command -v python-zig)" "$HOME/.local/bin/zig"
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y --noninteractive flathub org.freedesktop.Platform//25.08
 
