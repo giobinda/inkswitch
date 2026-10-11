@@ -1,8 +1,7 @@
-//! Settings window (`xppen-profiles gui`): profiles, what they do, and which apps load them.
+//! Settings window (`inkswitch gui`): profiles, what they do, and which apps load them.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
-use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
@@ -14,7 +13,7 @@ use super::presets::PRESETS;
 use super::settings::{key_name, parse_action, parse_key, pressure_curve, Action, Chord, Profile, PEN_BUTTON_1, PEN_BUTTON_2};
 use super::{
     bind_app, daemon_running, keep, new_from_preset, new_profile, notify_daemon, remove_profile, rename_profile, unbind_app,
-    use_profile, vendor_driver_running, Config, Paths, GUI_APP_ID,
+    gui_app_id, use_profile, vendor_driver_running, Config, Paths,
 };
 
 /// How often profiles and settings are re-read from disk.
@@ -29,8 +28,8 @@ const MESSAGE_TIME: Duration = Duration::from_secs(6);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(60, 170, 90);
 const RED: egui::Color32 = egui::Color32::from_rgb(200, 70, 70);
 
-const TILE: egui::Vec2 = egui::vec2(180.0, 214.0);
-const TILE_ICON: f32 = 80.0;
+const TILE: egui::Vec2 = egui::vec2(158.0, 186.0);
+const TILE_ICON: f32 = 64.0;
 
 /// Everything read from disk, re-read once per `REFRESH`.
 #[derive(Default)]
@@ -70,6 +69,29 @@ enum TileAction {
     Edit(String),
 }
 
+impl Slot {
+    /// The key a control's name is stored under in a profile.
+    fn id(self) -> String {
+        match self {
+            Slot::Key(i) => format!("key{}", i + 1),
+            Slot::DialCw => "dial_cw".into(),
+            Slot::DialCcw => "dial_ccw".into(),
+            Slot::PenButton1 => "pen_button1".into(),
+            Slot::PenButton2 => "pen_button2".into(),
+        }
+    }
+
+    fn action(self, profile: &Profile) -> &str {
+        match self {
+            Slot::Key(i) => profile.keys.get(i).map_or("", String::as_str),
+            Slot::DialCw => &profile.dial_cw,
+            Slot::DialCcw => &profile.dial_ccw,
+            Slot::PenButton1 => &profile.pen_button1,
+            Slot::PenButton2 => &profile.pen_button2,
+        }
+    }
+}
+
 /// The "type a shortcut" dialog.
 struct Typing {
     slot: Slot,
@@ -89,6 +111,8 @@ struct App {
     outputs: Vec<String>,
     outputs_refreshed: Option<Instant>,
     page: Page,
+    /// The profile in use, for the overview on the main screen.
+    in_use: Option<(String, Profile)>,
     /// The shown profile as edited, and as last written to disk.
     edit: Profile,
     saved: Profile,
@@ -108,18 +132,16 @@ struct App {
     dial_step: i32,
 }
 
-/// Names of the connected screens.
+/// Names of the connected screens, as the kernel lists them ("card1-DP-1" is the screen DP-1).
 fn list_outputs() -> Vec<String> {
-    let Ok(out) = Command::new("kscreen-doctor").arg("-o").output() else { return Vec::new() };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            // "Output: 1 eDP-1 <uuid>", wrapped in colour codes
-            let plain: String = line.split('\u{1b}').map(|part| part.split_once('m').map_or(part, |(_, rest)| rest)).collect();
-            let mut words = plain.split_whitespace();
-            (words.next() == Some("Output:")).then(|| words.nth(1).map(str::to_string)).flatten()
-        })
-        .collect()
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
+    let mut outputs: Vec<String> = entries
+        .flatten()
+        .filter(|e| std::fs::read_to_string(e.path().join("status")).is_ok_and(|s| s.trim() == "connected"))
+        .filter_map(|e| e.file_name().to_string_lossy().split_once('-').map(|(_, name)| name.to_string()))
+        .collect();
+    outputs.sort();
+    outputs
 }
 
 /// The position of a key as egui reports it, by its Linux key name.
@@ -239,6 +261,8 @@ impl App {
         if id != self.layout.id {
             self.layout = Layout::load(id, name);
         }
+
+        self.in_use = self.snap.active.clone().and_then(|name| Some((name.clone(), self.paths.load_profile(&name).ok()?)));
 
         if let Page::Profile(name) = &self.page {
             let profiles = &self.snap.profiles;
@@ -371,6 +395,18 @@ impl App {
             ui.label(text);
         });
         ui.horizontal(|ui| {
+            // Named after what it does; left empty, the shortcut itself stands in.
+            let id = slot.id();
+            let mut name = self.edit.names.get(&id).cloned().unwrap_or_default();
+            let unnamed = self.describe(slot.action(&self.edit)).0;
+            let field = egui::TextEdit::singleline(&mut name).hint_text(unnamed).desired_width(150.0);
+            if ui.add(field).on_hover_text("What this does, for the overview. For example: Undo").changed() {
+                if name.trim().is_empty() {
+                    self.edit.names.remove(&id);
+                } else {
+                    self.edit.names.insert(id, name);
+                }
+            }
             let size = egui::vec2(260.0, 30.0);
             if let Some((_, append)) = self.recording.filter(|(s, _)| *s == slot) {
                 let waiting = egui::RichText::new("Press keys, or click here…").italics();
@@ -496,15 +532,9 @@ impl App {
                 ui.label("The tablet driver is not running");
                 if self.snap.vendor_driver {
                     ui.weak("(the official XP-Pen driver is running instead)");
-                } else if ui.button("Start it").clicked() {
+                } else if ui.button("Set up and start").on_hover_text("Installs the background service and, if needed, permission to use the tablet").clicked() {
                     self.run("Driver started", |_| {
-                        let ok = Command::new("systemctl")
-                            .args(["--user", "start", "xppen-profiles.service"])
-                            .status()
-                            .is_ok_and(|s| s.success());
-                        if !ok {
-                            return Err(anyhow!("could not start xppen-profiles.service"));
-                        }
+                        super::setup::install()?;
                         // Give it a moment so the indicator is right on the reload that follows.
                         std::thread::sleep(Duration::from_millis(400));
                         Ok(())
@@ -569,7 +599,7 @@ impl App {
                 let color: egui::Color32 = egui::ecolor::Hsva::new(hue as f32 / 360.0, 0.45, 0.55, 1.0).into();
                 inner.painter().circle_filled(area.center(), TILE_ICON / 2.0 - 4.0, color);
                 let initial = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-                inner.painter().text(area.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::proportional(36.0), egui::Color32::WHITE);
+                inner.painter().text(area.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::proportional(30.0), egui::Color32::WHITE);
             }
         }
         inner.add_space(4.0);
@@ -588,6 +618,81 @@ impl App {
         }
         let hint = if is_active { "This profile is in use" } else { "Switch the tablet to this profile" };
         response.on_hover_text(hint).clicked().then(|| TileAction::Use(name.to_string()))
+    }
+
+    /// What a control is called on the overview, and the shortcut behind the name if it has one.
+    fn title(&self, profile: &Profile, slot: Slot) -> (String, Option<String>) {
+        let shortcut = self.describe(slot.action(profile)).0;
+        match profile.names.get(&slot.id()).map(|n| n.trim()).filter(|n| !n.is_empty()) {
+            Some(name) => (name.to_string(), Some(shortcut)),
+            None => (shortcut, None),
+        }
+    }
+
+    /// A drawing of the tablet with what each control does in the profile in use.
+    fn overview(&self, ui: &mut egui::Ui) {
+        let Some((name, profile)) = &self.in_use else { return };
+        card(ui, &format!("{name}: what the tablet does now"), |ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 340.0), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            let visuals = ui.visuals();
+            let (strong, weak) = (visuals.strong_text_color(), visuals.weak_text_color());
+            let (name_font, detail_font) = (egui::FontId::proportional(15.0), egui::FontId::proportional(12.5));
+            let line = egui::Stroke::new(1.0_f32, weak);
+
+            // The tablet: a body with a strip of controls on its left and the screen beside it.
+            let labels_width = (rect.width() * 0.45).min(360.0);
+            let body = egui::Rect::from_min_max(rect.left_top() + egui::vec2(labels_width, 4.0), rect.right_bottom() - egui::vec2(4.0, 4.0));
+            painter.rect_filled(body, 18, egui::Color32::from_gray(48));
+            let strip = 56.0;
+            let screen = egui::Rect::from_min_max(body.left_top() + egui::vec2(strip + 4.0, 16.0), body.right_bottom() - egui::vec2(16.0, 16.0));
+            painter.rect_filled(screen, 6, visuals.extreme_bg_color);
+
+            // Ten rows down the strip: four keys, the dial taking two, four keys.
+            let row_height = (body.height() - 28.0) / 10.0;
+            let row_y = |row: usize| body.top() + 14.0 + row_height * (row as f32 + 0.5);
+            let strip_x = body.left() + strip / 2.0 + 2.0;
+            let label_x = body.left() - 26.0;
+            let label = |row: usize, slot: Slot, extra: Option<&str>, target_x: f32| {
+                let (title, shortcut) = self.title(profile, slot);
+                let empty = slot.action(profile).trim().is_empty() && shortcut.is_none();
+                let at = egui::pos2(label_x, row_y(row));
+                let drawn = painter.text(at, egui::Align2::RIGHT_CENTER, title, name_font.clone(), if empty { weak } else { strong });
+                let detail: Vec<&str> = extra.into_iter().chain(shortcut.as_deref()).collect();
+                if !detail.is_empty() {
+                    let at = egui::pos2(drawn.left() - 12.0, row_y(row));
+                    painter.text(at, egui::Align2::RIGHT_CENTER, detail.join("  ·  "), detail_font.clone(), weak);
+                }
+                painter.line_segment([egui::pos2(label_x + 8.0, row_y(row)), egui::pos2(target_x, row_y(row))], line);
+            };
+            for key in 0..8 {
+                let row = if key < 4 { key } else { key + 2 };
+                let cap = egui::Rect::from_center_size(egui::pos2(strip_x, row_y(row)), egui::vec2(30.0, row_height - 9.0));
+                let lit = self.held_keys & (1 << key) != 0;
+                painter.rect_filled(cap, 4, if lit { GREEN } else { egui::Color32::from_gray(120) });
+                label(row, Slot::Key(key), None, cap.left() - 4.0);
+            }
+            let dial = egui::pos2(strip_x, (row_y(4) + row_y(5)) / 2.0);
+            let radius = row_height * 0.72;
+            let dial_color = if self.dial_step != 0 { GREEN } else { egui::Color32::from_gray(120) };
+            painter.circle_stroke(dial, radius, egui::Stroke::new(5.0_f32, dial_color));
+            label(4, Slot::DialCw, Some("dial clockwise"), dial.x - radius - 6.0);
+            label(5, Slot::DialCcw, Some("dial counter-clockwise"), dial.x - radius - 6.0);
+
+            // The pen's two buttons, written on the screen.
+            let mut at = screen.left_top() + egui::vec2(18.0, 16.0);
+            painter.text(at, egui::Align2::LEFT_TOP, "Pen", name_font.clone(), strong);
+            for (what, slot) in [("Lower button", Slot::PenButton1), ("Upper button", Slot::PenButton2)] {
+                at.y += 26.0;
+                let (title, shortcut) = self.title(profile, slot);
+                let drawn = painter.text(at, egui::Align2::LEFT_TOP, what, detail_font.clone(), weak);
+                let drawn = painter.text(egui::pos2(drawn.right() + 12.0, at.y - 2.0), egui::Align2::LEFT_TOP, title, name_font.clone(), strong);
+                if let Some(shortcut) = shortcut {
+                    painter.text(egui::pos2(drawn.right() + 12.0, at.y), egui::Align2::LEFT_TOP, shortcut, detail_font.clone(), weak);
+                }
+            }
+            ui.weak("Press a key on the tablet to see it light up. Use Edit on the profile to change or name what the keys do.");
+        });
     }
 
     fn home_page(&mut self, ui: &mut egui::Ui) {
@@ -623,6 +728,8 @@ impl App {
                 self.new_name = Some(String::new());
             }
         });
+        ui.add_space(14.0);
+        self.overview(ui);
         match action {
             Some(TileAction::Use(name)) => self.run(format!("Now using '{name}'"), |p| use_profile(p, &name)),
             Some(TileAction::Edit(name)) => self.open(Page::Profile(name)),
@@ -667,7 +774,7 @@ impl App {
                             ui.end_row();
                         }
                         ui.weak("Dial");
-                        ui.weak(format!("{}  ({} and {})", preset.dial.0, preset.dial.2, preset.dial.1));
+                        ui.weak(format!("{} and {}  ({} and {})", preset.dial[0].0, preset.dial[1].0.to_lowercase(), preset.dial[0].1, preset.dial[1].1));
                         ui.end_row();
                     });
                     ui.weak("It switches on by itself when the application is in front.");
@@ -892,6 +999,7 @@ impl App {
         card(ui, "Applications", |ui| self.applications(ui, name));
         card(ui, "Express keys", |ui| {
             ui.label("Click a shortcut to change it. Press a key on the tablet and it lights up here.");
+            ui.weak("The first field is a name for what the key does, such as Undo. It is shown on the overview; without one the shortcut is shown.");
             ui.weak("A shortcut stays held for as long as you hold the key, so a key set to Ctrl or Space works like the real one.");
             ui.weak("Mouse clicks land where the pen is while it is over the tablet, otherwise at the mouse pointer.");
             ui.add_space(4.0);
@@ -1012,9 +1120,9 @@ impl eframe::App for App {
 pub fn run(paths: Paths) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("XP-Pen Tablet")
-            .with_app_id(GUI_APP_ID)
-            .with_inner_size([900.0, 820.0])
+            .with_title("Inkswitch")
+            .with_app_id(gui_app_id())
+            .with_inner_size([900.0, 940.0])
             .with_min_inner_size([720.0, 440.0]),
         ..Default::default()
     };
@@ -1031,6 +1139,7 @@ pub fn run(paths: Paths) -> Result<()> {
         outputs: Vec::new(),
         outputs_refreshed: None,
         page: Page::Home,
+        in_use: None,
         edit: Profile::default(),
         saved: Profile::default(),
         recording: None,
@@ -1045,7 +1154,7 @@ pub fn run(paths: Paths) -> Result<()> {
         dial_step: 0,
     };
     eframe::run_native(
-        "XP-Pen Tablet",
+        "Inkswitch",
         options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);

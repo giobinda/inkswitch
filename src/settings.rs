@@ -5,6 +5,8 @@
 //! input names without the `KEY_` prefix and stand for key positions on a US layout; the mouse
 //! buttons are `leftclick`, `middleclick` and `rightclick` and combine like keys (`shift+leftclick`).
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Result};
 use evdev::KeyCode;
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,9 @@ pub struct Profile {
     pub pen_button2: String,
     /// Control point of the pressure curve; [0.5, 0.5] is linear.
     pub pressure: [f32; 2],
+    /// What the user calls a control's function ("Undo"), by control: `key1`..`key8`,
+    /// `dial_cw`, `dial_ccw`, `pen_button1`, `pen_button2`. Unnamed ones show their shortcut.
+    pub names: BTreeMap<String, String>,
 }
 
 impl Default for Profile {
@@ -39,6 +44,7 @@ impl Default for Profile {
             pen_button1: PEN_BUTTON_1.into(),
             pen_button2: PEN_BUTTON_2.into(),
             pressure: [0.5, 0.5],
+            names: BTreeMap::new(),
         }
     }
 }

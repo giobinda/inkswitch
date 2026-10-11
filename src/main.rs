@@ -20,26 +20,45 @@ mod icons;
 mod layout;
 mod presets;
 mod settings;
+mod setup;
 
 use settings::Profile;
 
-const BUS_NAME: &str = "dev.xppen.Profiles";
-const BUS_PATH: &str = "/dev/xppen/Profiles";
-const KWIN_SCRIPT_NAME: &str = "xppen-profiles";
+const BUS_NAME: &str = "io.github.giobinda.Inkswitch";
+const BUS_PATH: &str = "/io/github/giobinda/Inkswitch";
+const KWIN_SCRIPT_NAME: &str = "inkswitch";
 const KWIN_SCRIPT: &str = include_str!("kwin_script.js");
 
-/// Window class of the `gui` subcommand; focusing it never switches profiles.
-const GUI_APP_ID: &str = "xppen-profiles";
+/// Window class of the `gui` subcommand. As a Flatpak it has to be the application's id, so
+/// the desktop finds the right icon.
+const GUI_APP_ID: &str = "inkswitch";
+const FLATPAK_ID: &str = "io.github.giobinda.Inkswitch";
+
+fn in_flatpak() -> bool {
+    env::var_os("FLATPAK_ID").is_some()
+}
+
+fn gui_app_id() -> &'static str {
+    if in_flatpak() { FLATPAK_ID } else { GUI_APP_ID }
+}
+
+/// Whether a window class is our own settings window; focusing it never switches profiles.
+fn is_own_window(class: &str) -> bool {
+    class.eq_ignore_ascii_case(GUI_APP_ID) || class.eq_ignore_ascii_case(FLATPAK_ID)
+}
 const RECENT_WINDOWS: usize = 20;
 /// The official driver's settings, imported once as the first profile.
 const VENDOR_CONFIG: &str = "/usr/lib/pentablet/conf/xppen/config.xml";
+/// Where a Flatpak sandbox sees the host's /usr.
+const HOST_ROOT: &str = "/run/host";
 const VENDOR_BIN: &str = "/usr/lib/pentablet/PenTablet";
 
 #[derive(Parser)]
 #[command(version, about = "Driver and per-application profiles for XP-Pen tablets")]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    /// Opens the settings window when left out
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -77,6 +96,12 @@ enum Cmd {
         /// Seconds of raw reports to print
         #[arg(long, default_value_t = 0)]
         seconds: u64,
+    },
+    /// Install the background service, the menu entry and access to the tablet for this user
+    Setup {
+        /// Undo the installation instead (profiles are kept)
+        #[arg(long)]
+        remove: bool,
     },
     /// Create the virtual pen without a tablet and sweep it across the screen
     #[command(hide = true)]
@@ -133,8 +158,8 @@ impl Paths {
         let xdg = |var: &str, default: &str| {
             env::var_os(var).map(PathBuf::from).unwrap_or_else(|| home.join(default))
         };
-        let base = xdg("XDG_CONFIG_HOME", ".config").join("xppen-profiles");
-        let state = xdg("XDG_STATE_HOME", ".local/state").join("xppen-profiles");
+        let base = xdg("XDG_CONFIG_HOME", ".config").join("inkswitch");
+        let state = xdg("XDG_STATE_HOME", ".local/state").join("inkswitch");
         let profiles = base.join("profiles");
         fs::create_dir_all(&profiles)?;
         fs::create_dir_all(&state)?;
@@ -211,7 +236,10 @@ impl Paths {
         if !self.profile_names()?.is_empty() {
             return Ok(());
         }
-        let imported = fs::read_to_string(VENDOR_CONFIG).ok().and_then(|xml| settings::import_vendor(&xml));
+        let imported = fs::read_to_string(VENDOR_CONFIG)
+            .or_else(|_| fs::read_to_string(format!("{HOST_ROOT}{VENDOR_CONFIG}")))
+            .ok()
+            .and_then(|xml| settings::import_vendor(&xml));
         if imported.is_some() {
             eprintln!("created profile 'default' from the official driver's settings");
         }
@@ -244,7 +272,7 @@ impl Paths {
             self.state.join("last_window"),
             format!("class: {}\nname: {}\ntitle: {}\n", win.class, win.name, win.caption),
         );
-        if class.is_empty() || class == GUI_APP_ID {
+        if class.is_empty() || is_own_window(&class) {
             return;
         }
         let mut recent = self.recent_windows();
@@ -390,7 +418,7 @@ struct Service {
     tx: mpsc::Sender<Msg>,
 }
 
-#[zbus::interface(name = "dev.xppen.Profiles")]
+#[zbus::interface(name = "io.github.giobinda.Inkswitch")]
 impl Service {
     fn focus(&self, class: String, name: String, caption: String) {
         let _ = self.tx.send(Msg::Focus(Window { class, name, caption }));
@@ -433,7 +461,7 @@ fn daemon(paths: &Paths) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let conn = zbus::blocking::connection::Builder::session()?
         .name(BUS_NAME)
-        .context("is another xppen-profiles daemon already running?")?
+        .context("is another inkswitch daemon already running?")?
         .serve_at(BUS_PATH, Service { tx })?
         .build()?;
 
@@ -469,8 +497,11 @@ fn daemon(paths: &Paths) -> Result<()> {
             )
         });
     }
-    load_kwin_script(&conn, paths).context("loading the KWin script (KDE Plasma 6 is required)")?;
-    eprintln!("watching window focus");
+    // Only KDE Plasma can tell us which window is in front; elsewhere profiles are picked by hand.
+    match load_kwin_script(&conn, paths) {
+        Ok(()) => eprintln!("watching window focus"),
+        Err(e) => eprintln!("profiles will not follow the focused window (this needs KDE Plasma 6): {e:#}"),
+    }
 
     let mut output = paths.load_config().map(|c| c.output).unwrap_or_default();
     while let Ok(msg) = rx.recv() {
@@ -484,7 +515,7 @@ fn daemon(paths: &Paths) -> Result<()> {
         };
         if let Msg::Focus(win) = &msg {
             paths.remember_window(win);
-            if win.class.to_lowercase() != GUI_APP_ID {
+            if !is_own_window(&win.class) {
                 if let Some(profile) = target_profile(&cfg, win) {
                     if paths.active().as_deref() != Some(&profile) && paths.profile(&profile).exists() {
                         eprintln!("{} -> profile '{profile}'", win.class);
@@ -510,7 +541,7 @@ fn daemon(paths: &Paths) -> Result<()> {
 fn test_pen() -> Result<()> {
     use evdev::{AbsoluteAxisCode as Abs, EventType, InputEvent, KeyCode};
     let ranges = driver::Ranges { max_x: 69080, max_y: 38860, max_pressure: 16383, lines_per_inch: 5080 };
-    let mut pen = driver::create_pen("xppen-profiles test", 0, &ranges)?;
+    let mut pen = driver::create_pen("inkswitch test", 0, &ranges)?;
     let sysname = driver::sysname(&mut pen).context("the pen device has no event node")?;
     println!("pen device: {sysname}");
     thread::sleep(std::time::Duration::from_millis(800));
@@ -544,7 +575,7 @@ fn test_pen() -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::new()?;
-    match cli.cmd {
+    match cli.cmd.unwrap_or(Cmd::Gui) {
         Cmd::New { name, from, preset, app } => {
             paths.ensure_default()?;
             match preset {
@@ -601,6 +632,8 @@ fn main() -> Result<()> {
             gui::run(paths)?
         }
         Cmd::Probe { seconds } => driver::probe(seconds)?,
+        Cmd::Setup { remove: false } => setup::install()?,
+        Cmd::Setup { remove: true } => setup::remove()?,
         Cmd::TestPen => test_pen()?,
     }
     Ok(())

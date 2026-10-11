@@ -16,8 +16,8 @@ pub struct Preset {
     pub apps: &'static [&'static str],
     /// What each express key does and its shortcut, top to bottom.
     pub keys: [(&'static str, &'static str); EXPRESS_KEYS],
-    /// What the dial does, then its clockwise and counter-clockwise shortcuts.
-    pub dial: (&'static str, &'static str, &'static str),
+    /// What a step of the dial does and its shortcut: clockwise, then counter-clockwise.
+    pub dial: [(&'static str, &'static str); 2],
 }
 
 pub const PRESETS: [Preset; 5] = [
@@ -35,7 +35,7 @@ pub const PRESETS: [Preset; 5] = [
             ("Swap colours", "X"),
             ("Save", "Ctrl+S"),
         ],
-        dial: ("Brush size", "]", "["),
+        dial: [("Bigger brush", "]"), ("Smaller brush", "[")],
     },
     Preset {
         name: "krita",
@@ -51,7 +51,7 @@ pub const PRESETS: [Preset; 5] = [
             ("Swap colours", "X"),
             ("Save", "Ctrl+S"),
         ],
-        dial: ("Brush size", "]", "["),
+        dial: [("Bigger brush", "]"), ("Smaller brush", "[")],
     },
     Preset {
         name: "gimp",
@@ -67,7 +67,7 @@ pub const PRESETS: [Preset; 5] = [
             ("Swap colours", "X"),
             ("Save", "Ctrl+S"),
         ],
-        dial: ("Brush size", "]", "["),
+        dial: [("Bigger brush", "]"), ("Smaller brush", "[")],
     },
     Preset {
         name: "inkscape",
@@ -83,7 +83,7 @@ pub const PRESETS: [Preset; 5] = [
             ("Duplicate", "Ctrl+D"),
             ("Save", "Ctrl+S"),
         ],
-        dial: ("Zoom", "+", "-"),
+        dial: [("Zoom in", "+"), ("Zoom out", "-")],
     },
     Preset {
         name: "blender",
@@ -99,7 +99,7 @@ pub const PRESETS: [Preset; 5] = [
             ("Brush strength", "Shift+F"),
             ("Save", "Ctrl+S"),
         ],
-        dial: ("Brush size", "]", "["),
+        dial: [("Bigger brush", "]"), ("Smaller brush", "[")],
     },
 ];
 
@@ -111,10 +111,15 @@ impl Preset {
     /// The preset as a profile for a keyboard with the given layout.
     pub fn profile(&self, layout: &Layout) -> Result<Profile> {
         let position = |shortcut: &str| layout.parse(shortcut).with_context(|| format!("preset '{}', shortcut {shortcut}", self.name));
+        let mut names: std::collections::BTreeMap<String, String> =
+            self.keys.iter().enumerate().map(|(i, (what, _))| (format!("key{}", i + 1), what.to_string())).collect();
+        names.insert("dial_cw".into(), self.dial[0].0.into());
+        names.insert("dial_ccw".into(), self.dial[1].0.into());
         Ok(Profile {
             keys: self.keys.iter().map(|(_, shortcut)| position(shortcut)).collect::<Result<_>>()?,
-            dial_cw: position(self.dial.1)?,
-            dial_ccw: position(self.dial.2)?,
+            dial_cw: position(self.dial[0].1)?,
+            dial_ccw: position(self.dial[1].1)?,
+            names,
             ..Profile::default()
         })
     }
@@ -143,5 +148,7 @@ mod tests {
         assert_eq!(profile.keys[4], "ctrl+y");
         // The brackets need AltGr on this layout.
         assert_eq!((profile.dial_cw.as_str(), profile.dial_ccw.as_str()), ("rightalt+9", "rightalt+8"));
+        assert_eq!(profile.names["key5"], "Undo");
+        assert_eq!(profile.names["dial_ccw"], "Smaller brush");
     }
 }

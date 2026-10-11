@@ -29,6 +29,9 @@ impl IconIndex {
             PathBuf::from("/var/lib/flatpak/exports/share"),
             PathBuf::from("/usr/local/share"),
             PathBuf::from("/usr/share"),
+            // The host's applications as seen from inside a Flatpak sandbox.
+            PathBuf::from("/run/host/usr/local/share"),
+            PathBuf::from("/run/host/usr/share"),
         ];
         let mut entries = Vec::new();
         for dir in &data_dirs {

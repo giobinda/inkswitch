@@ -1,0 +1,9 @@
+# Lets the logged-in user run the XP-Pen tablet driver (Inkswitch) without root.
+# The number matters: "uaccess" has to be set before 73-seat-late.rules applies it.
+
+# The tablet itself, to read its reports.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="28bd", TAG+="uaccess"
+# The input devices the kernel creates for it, which the driver takes over.
+SUBSYSTEM=="input", ATTRS{idVendor}=="28bd", TAG+="uaccess"
+# uinput, to create the pen and shortcut devices.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

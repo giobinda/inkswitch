@@ -1723,6 +1723,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "inkswitch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "eframe",
+ "egui_extras",
+ "evdev",
+ "image",
+ "libc",
+ "roxmltree 0.21.1",
+ "serde",
+ "toml",
+ "xkbcommon-dl",
+ "zbus 5.19.0",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4410,24 +4428,6 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
-
-[[package]]
-name = "xppen-profiles"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "eframe",
- "egui_extras",
- "evdev",
- "image",
- "libc",
- "roxmltree 0.21.1",
- "serde",
- "toml",
- "xkbcommon-dl",
- "zbus 5.19.0",
-]
 
 [[package]]
 name = "yoke"

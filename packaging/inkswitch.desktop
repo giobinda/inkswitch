@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Inkswitch
+Comment=Tablet driver and per-application profiles for XP-Pen tablets
+Exec=inkswitch
+Icon=inkswitch
+Categories=Settings;HardwareSettings;
+StartupWMClass=inkswitch
