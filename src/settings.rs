@@ -2,7 +2,8 @@
 //!
 //! An action is text such as `ctrl+s` (keys held while the button is held), `5 1` (several
 //! combinations tapped one after the other), `pen-button-1` or `none`. Key names are the Linux
-//! input names without the `KEY_` prefix and stand for key positions on a US layout.
+//! input names without the `KEY_` prefix and stand for key positions on a US layout; the mouse
+//! buttons are `leftclick`, `middleclick` and `rightclick` and combine like keys (`shift+leftclick`).
 
 use anyhow::{bail, Result};
 use evdev::KeyCode;
@@ -12,6 +13,9 @@ pub const EXPRESS_KEYS: usize = 8;
 
 pub const PEN_BUTTON_1: &str = "pen-button-1";
 pub const PEN_BUTTON_2: &str = "pen-button-2";
+
+const MOUSE_BUTTONS: [(&str, KeyCode); 3] =
+    [("leftclick", KeyCode::BTN_LEFT), ("middleclick", KeyCode::BTN_MIDDLE), ("rightclick", KeyCode::BTN_RIGHT)];
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -65,7 +69,7 @@ pub struct Compiled {
 
 impl Profile {
     pub fn compile(&self) -> Compiled {
-        // Text that doesn't parse does nothing; the GUI refuses to save such text.
+        // Text that doesn't parse does nothing.
         let action = |s: &String| parse_action(s).unwrap_or(Action::None);
         Compiled {
             keys: self.keys.iter().map(action).collect(),
@@ -75,15 +79,6 @@ impl Profile {
             pen_button2: action(&self.pen_button2),
             pressure: self.pressure,
         }
-    }
-
-    /// The first problem in any of the profile's actions.
-    pub fn validate(&self) -> Result<()> {
-        let all = self.keys.iter().chain([&self.dial_cw, &self.dial_ccw, &self.pen_button1, &self.pen_button2]);
-        for text in all {
-            parse_action(text)?;
-        }
-        Ok(())
     }
 }
 
@@ -117,8 +112,11 @@ const ALIASES: [(&str, &str); 27] = [
     ("spacebar", "space"),
 ];
 
-fn parse_key(name: &str) -> Result<KeyCode> {
+pub fn parse_key(name: &str) -> Result<KeyCode> {
     let lower = name.trim().to_lowercase();
+    if let Some((_, button)) = MOUSE_BUTTONS.iter().find(|(name, _)| *name == lower) {
+        return Ok(*button);
+    }
     let canonical = ALIASES.iter().find(|(alias, _)| *alias == lower).map_or(lower.as_str(), |(_, k)| k);
     match format!("KEY_{}", canonical.to_uppercase()).parse::<KeyCode>() {
         Ok(key) => Ok(key),
@@ -144,6 +142,9 @@ pub fn parse_action(text: &str) -> Result<Action> {
 
 /// The name a key is written with in a profile.
 pub fn key_name(key: KeyCode) -> String {
+    if let Some((name, _)) = MOUSE_BUTTONS.iter().find(|(_, button)| *button == key) {
+        return name.to_string();
+    }
     let name = format!("{key:?}").trim_start_matches("KEY_").to_lowercase();
     match name.as_str() {
         "leftctrl" => "ctrl".into(),
@@ -255,6 +256,8 @@ mod tests {
         assert_eq!(parse_action("shift+space").unwrap(), Action::Chord(vec![KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_SPACE]));
         assert_eq!(parse_action("\\").unwrap(), Action::Chord(vec![KeyCode::KEY_BACKSLASH]));
         assert_eq!(parse_action("pen-button-2").unwrap(), Action::Stylus2);
+        assert_eq!(parse_action("shift+leftclick").unwrap(), Action::Chord(vec![KeyCode::KEY_LEFTSHIFT, KeyCode::BTN_LEFT]));
+        assert_eq!(key_name(KeyCode::BTN_RIGHT), "rightclick");
         assert!(parse_action("ctrl+nope").is_err());
     }
 
@@ -279,7 +282,6 @@ mod tests {
         assert_eq!((p.dial_cw.as_str(), p.dial_ccw.as_str()), ("backslash", "apostrophe"));
         assert_eq!(p.pen_button1, PEN_BUTTON_1);
         assert_eq!(p.pressure, [0.25, 0.75]);
-        p.validate().unwrap();
     }
 
     #[test]

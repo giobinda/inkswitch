@@ -7,9 +7,12 @@ edition = "2024"
 anyhow = "1.0.104"
 clap = { version = "4", features = ["derive"] }
 eframe = "0.31"
+egui_extras = { version = "0.31", features = ["svg", "image", "file"] }
 evdev = "0.13"
+image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2.190"
 roxmltree = "0.21.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "0.8"
+xkbcommon-dl = "0.4"
 zbus = "5"

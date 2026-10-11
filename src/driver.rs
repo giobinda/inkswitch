@@ -2,7 +2,9 @@
 //!
 //! The tablet is switched to its vendor reporting mode over raw USB; pen, express-key and dial
 //! reports are then translated into two uinput devices: a pen the compositor treats as a
-//! drawing tablet, and a keyboard that plays the shortcuts of the current profile.
+//! drawing tablet, and a keyboard (with mouse buttons) that plays the shortcuts of the current
+//! profile. Mouse clicks in a shortcut are made with the pen while it is over the tablet, since
+//! the desktop's mouse pointer does not follow the pen.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -14,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use evdev::uinput::VirtualDevice;
-use evdev::{AbsInfo, AbsoluteAxisCode as Abs, AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode, UinputAbsSetup};
+use evdev::{AbsInfo, AbsoluteAxisCode as Abs, AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode, RelativeAxisCode, UinputAbsSetup};
 
 use crate::settings::{pressure_curve, Action, Chord, Compiled};
 
@@ -26,6 +28,8 @@ const PARAMS_STRING: u16 = 100;
 const RETRY: Duration = Duration::from_secs(1);
 /// How long a tapped shortcut stays down; applications miss key presses of no duration.
 const TAP: Duration = Duration::from_millis(12);
+/// Pause between events sent through different virtual devices, which keeps their order.
+const DEVICE_GAP: Duration = Duration::from_millis(4);
 
 /// State shared between the driver thread and whoever switches profiles.
 pub struct Shared {
@@ -336,10 +340,18 @@ fn create_keyboard(name: &str, product_id: u16) -> Result<VirtualDevice> {
     for code in 1..=248 {
         keys.insert(KeyCode::new(code));
     }
+    for button in [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE] {
+        keys.insert(button);
+    }
+    // Mouse buttons are only accepted from a device that can also move the pointer.
+    let mut axes = AttributeSet::<RelativeAxisCode>::new();
+    axes.insert(RelativeAxisCode::REL_X);
+    axes.insert(RelativeAxisCode::REL_Y);
     let device = VirtualDevice::builder()?
         .name(&format!("{name} Keys"))
         .input_id(InputId::new(BusType::BUS_USB, VENDOR_ID, product_id, 0x100))
         .with_keys(&keys)?
+        .with_relative_axes(&axes)?
         .build()
         .context("creating the shortcut keyboard")?;
     Ok(device)
@@ -362,14 +374,34 @@ pub fn map_to_output(conn: &zbus::blocking::Connection, sysname: &str, output: &
     Ok(())
 }
 
+/// Where one part of a held shortcut went, so it is released the same way.
+#[derive(Clone, Copy)]
+enum Sent {
+    /// A key or mouse button on the virtual keyboard.
+    Keyboard(KeyCode),
+    /// A mouse button made with the pen: its tip or one of its buttons.
+    Pen(KeyCode),
+}
+
 /// What a physical button currently holds down, so it can be released even if the profile
 /// changed in the meantime.
 #[derive(Default, Clone)]
 enum Held {
     #[default]
     Nothing,
-    Keys(Chord),
+    Shortcut(Vec<Sent>),
     Stylus(KeyCode),
+}
+
+/// How a mouse button is made with the pen: touching down for a left click, and the pen
+/// buttons that Qt applications (Krita among them) read as middle and right click.
+fn pen_equivalent(button: KeyCode) -> Option<KeyCode> {
+    match button {
+        KeyCode::BTN_LEFT => Some(KeyCode::BTN_TOUCH),
+        KeyCode::BTN_MIDDLE => Some(KeyCode::BTN_STYLUS),
+        KeyCode::BTN_RIGHT => Some(KeyCode::BTN_STYLUS2),
+        _ => None,
+    }
 }
 
 struct Session {
@@ -378,6 +410,11 @@ struct Session {
     ranges: Ranges,
     /// BTN_TOOL_PEN or BTN_TOOL_RUBBER while the pen is in range.
     tool: Option<KeyCode>,
+    /// Whether the pen really touches, and its (curved) pressure, as of the last report.
+    tip: bool,
+    pressure: i32,
+    /// Tip and pen buttons pressed on the user's behalf by shortcuts with mouse clicks in them.
+    forced: Vec<KeyCode>,
     express_down: u16,
     express_held: Vec<Held>,
     pen_buttons_down: [bool; 2],
@@ -385,13 +422,70 @@ struct Session {
 }
 
 impl Session {
-    fn tap(&mut self, chord: &Chord) -> Result<()> {
-        let down: Vec<InputEvent> = chord.iter().map(|k| key(*k, true)).collect();
-        let up: Vec<InputEvent> = chord.iter().rev().map(|k| key(*k, false)).collect();
-        self.keyboard.emit(&down)?;
-        thread::sleep(TAP);
-        self.keyboard.emit(&up)?;
+    /// Tip and button state of the pen: what it really does plus what shortcuts add.
+    fn pen_button_events(&self) -> [InputEvent; 4] {
+        let forced = |code| self.forced.contains(&code);
+        let stylus = |code| forced(code) || self.pen_buttons_held.iter().any(|h| matches!(h, Held::Stylus(c) if *c == code));
+        let touching = self.tip || forced(KeyCode::BTN_TOUCH);
+        let pressure = match (self.tip, touching) {
+            (true, _) => self.pressure.max(1),
+            // A click made on the user's behalf presses at half strength.
+            (false, true) => self.ranges.max_pressure / 2,
+            (false, false) => 0,
+        };
+        [
+            abs(Abs::ABS_PRESSURE, pressure),
+            key(KeyCode::BTN_TOUCH, touching),
+            key(KeyCode::BTN_STYLUS, stylus(KeyCode::BTN_STYLUS)),
+            key(KeyCode::BTN_STYLUS2, stylus(KeyCode::BTN_STYLUS2)),
+        ]
+    }
+
+    /// Presses a shortcut, in order, and returns how to let go of it.
+    fn down(&mut self, chord: &Chord) -> Result<Vec<Sent>> {
+        let mut sent = Vec::new();
+        for code in chord {
+            match pen_equivalent(*code).filter(|_| self.tool.is_some()) {
+                Some(button) => {
+                    if !sent.is_empty() {
+                        // Two devices are involved; make sure the modifiers arrive first.
+                        thread::sleep(DEVICE_GAP);
+                    }
+                    self.forced.push(button);
+                    self.pen.emit(&self.pen_button_events())?;
+                    sent.push(Sent::Pen(button));
+                }
+                None => {
+                    self.keyboard.emit(&[key(*code, true)])?;
+                    sent.push(Sent::Keyboard(*code));
+                }
+            }
+        }
+        Ok(sent)
+    }
+
+    fn up(&mut self, sent: &[Sent]) -> Result<()> {
+        for part in sent.iter().rev() {
+            match part {
+                Sent::Keyboard(code) => self.keyboard.emit(&[key(*code, false)])?,
+                Sent::Pen(button) => {
+                    if let Some(i) = self.forced.iter().position(|b| b == button) {
+                        self.forced.remove(i);
+                    }
+                    if self.tool.is_some() {
+                        self.pen.emit(&self.pen_button_events())?;
+                    }
+                    thread::sleep(DEVICE_GAP);
+                }
+            }
+        }
         Ok(())
+    }
+
+    fn tap(&mut self, chord: &Chord) -> Result<()> {
+        let sent = self.down(chord)?;
+        thread::sleep(TAP);
+        self.up(&sent)
     }
 
     /// Performs an action that has no button to be held by, such as a dial step.
@@ -409,11 +503,7 @@ impl Session {
             Action::None => Held::Nothing,
             Action::Stylus1 => Held::Stylus(KeyCode::BTN_STYLUS),
             Action::Stylus2 => Held::Stylus(KeyCode::BTN_STYLUS2),
-            Action::Chord(chord) => {
-                let down: Vec<InputEvent> = chord.iter().map(|k| key(*k, true)).collect();
-                self.keyboard.emit(&down)?;
-                Held::Keys(chord.clone())
-            }
+            Action::Chord(chord) => Held::Shortcut(self.down(chord)?),
             Action::Sequence(chords) => {
                 for chord in chords {
                     self.tap(chord)?;
@@ -424,14 +514,14 @@ impl Session {
     }
 
     fn release(&mut self, held: Held) -> Result<()> {
-        if let Held::Keys(chord) = held {
-            let up: Vec<InputEvent> = chord.iter().rev().map(|k| key(*k, false)).collect();
-            self.keyboard.emit(&up)?;
+        match held {
+            Held::Shortcut(sent) => self.up(&sent),
+            Held::Nothing | Held::Stylus(_) => Ok(()),
         }
-        Ok(())
     }
 
     fn leave_range(&mut self) -> Result<()> {
+        self.tip = false;
         if let Some(tool) = self.tool.take() {
             self.pen.emit(&[
                 abs(Abs::ABS_PRESSURE, 0),
@@ -465,20 +555,17 @@ impl Session {
                         self.release(held)?;
                     }
                 }
-                let stylus = |code| self.pen_buttons_held.iter().any(|h| matches!(h, Held::Stylus(c) if *c == code));
                 let raw = pressure.clamp(0, self.ranges.max_pressure) as f32 / self.ranges.max_pressure as f32;
-                let curved = (pressure_curve(profile.pressure, raw) * self.ranges.max_pressure as f32).round() as i32;
-                let events = [
+                self.tip = tip;
+                self.pressure = (pressure_curve(profile.pressure, raw) * self.ranges.max_pressure as f32).round() as i32;
+                let mut events = vec![
                     abs(Abs::ABS_X, x.clamp(0, self.ranges.max_x)),
                     abs(Abs::ABS_Y, y.clamp(0, self.ranges.max_y)),
-                    abs(Abs::ABS_PRESSURE, if tip { curved.max(1) } else { 0 }),
                     abs(Abs::ABS_TILT_X, tilt_x.clamp(-60, 60)),
                     abs(Abs::ABS_TILT_Y, tilt_y.clamp(-60, 60)),
                     key(tool, true),
-                    key(KeyCode::BTN_TOUCH, tip),
-                    key(KeyCode::BTN_STYLUS, stylus(KeyCode::BTN_STYLUS)),
-                    key(KeyCode::BTN_STYLUS2, stylus(KeyCode::BTN_STYLUS2)),
                 ];
+                events.extend(self.pen_button_events());
                 self.pen.emit(&events)?;
                 self.tool = Some(tool);
             }
@@ -509,7 +596,7 @@ impl Session {
 }
 
 /// Serves one tablet until it is unplugged (which surfaces as a read error).
-fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Ranges)) -> Result<()> {
+fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Ranges), on_aux: &dyn Fn(u16, i32)) -> Result<()> {
     let usb = Usb::start(tablet)?;
     let ranges = match usb.string_descriptor(PARAMS_STRING).map(|d| parse_params(&d)) {
         Ok(Some(ranges)) => ranges,
@@ -525,6 +612,9 @@ fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Ranges)) -
         keyboard: create_keyboard(&tablet.name, tablet.product_id)?,
         ranges,
         tool: None,
+        tip: false,
+        pressure: 0,
+        forced: Vec::new(),
         express_down: 0,
         express_held: vec![Held::Nothing; 16],
         pen_buttons_down: [false; 2],
@@ -538,14 +628,18 @@ fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Ranges)) -
     loop {
         let Some(n) = usb.read_report(tablet, &mut buf)? else { continue };
         if let Some(report) = parse_report(&buf[..n]) {
+            if let Report::Aux { keys, dial } = report {
+                on_aux(keys, dial);
+            }
             session.handle(report, &shared.profile())?;
         }
     }
 }
 
 /// Runs forever: waits for a tablet, serves it, and starts over when it goes away.
-/// `status` is called with a line describing the connection whenever it changes.
-pub fn run(shared: Arc<Shared>, status: impl Fn(&str), on_connect: impl Fn(&str, &Ranges)) -> ! {
+/// `status` is called with a line describing the connection whenever it changes, `on_aux`
+/// with the express keys held (as a bitmask) and the dial step on every such report.
+pub fn run(shared: Arc<Shared>, status: impl Fn(&str), on_connect: impl Fn(&str, &Ranges), on_aux: impl Fn(u16, i32)) -> ! {
     status("not connected");
     loop {
         let Some(tablet) = find_tablet() else {
@@ -554,7 +648,7 @@ pub fn run(shared: Arc<Shared>, status: impl Fn(&str), on_connect: impl Fn(&str,
         };
         eprintln!("tablet found: {}", tablet.name);
         status(&format!("connected: {}", tablet.name));
-        if let Err(e) = serve(&tablet, &shared, &on_connect) {
+        if let Err(e) = serve(&tablet, &shared, &on_connect, &on_aux) {
             // Unplugging ends up here too.
             eprintln!("tablet session ended: {e:#}");
         }

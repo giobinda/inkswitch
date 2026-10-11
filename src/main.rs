@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 
 mod driver;
 mod gui;
+mod icons;
+mod layout;
+mod presets;
 mod settings;
 
 use settings::Profile;
@@ -41,11 +44,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a profile as a copy of another one (the active one by default)
+    /// Create a profile as a copy of another one (the active one by default) or from a preset
     New {
         name: String,
         #[arg(long)]
         from: Option<String>,
+        /// Start from the usual shortcuts of an application: photoshop, krita, gimp, inkscape, blender
+        #[arg(long, conflicts_with = "from")]
+        preset: Option<String>,
         /// Window class to bind to this profile (see `status` for the last focused window)
         #[arg(long)]
         app: Vec<String>,
@@ -171,7 +177,21 @@ impl Paths {
 
     fn set_active(&self, name: &str) -> Result<()> {
         fs::write(self.state.join("active"), name)?;
+        let mut used = self.last_used();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        used.insert(name.to_string(), now);
+        let lines: Vec<String> = used.iter().map(|(profile, at)| format!("{profile}\t{at}\n")).collect();
+        let _ = fs::write(self.state.join("last_used"), lines.concat());
         Ok(())
+    }
+
+    /// When each profile was last switched to, in milliseconds since the epoch.
+    fn last_used(&self) -> BTreeMap<String, u128> {
+        let Ok(text) = fs::read_to_string(self.state.join("last_used")) else { return BTreeMap::new() };
+        text.lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter_map(|(profile, at)| Some((profile.to_string(), at.parse().ok()?)))
+            .collect()
     }
 
     fn profile_names(&self) -> Result<Vec<String>> {
@@ -269,6 +289,23 @@ fn new_profile(paths: &Paths, name: &str, from: Option<&str>, apps: &[String]) -
     paths.save_config(&cfg)
 }
 
+/// Creates a profile with an application's usual shortcuts and binds that application to it,
+/// unless it already has a profile.
+fn new_from_preset(paths: &Paths, name: &str, preset: &presets::Preset, layout: &layout::Layout) -> Result<()> {
+    check_name(name)?;
+    if paths.profile(name).exists() {
+        bail!("a profile named '{name}' already exists");
+    }
+    paths.save_profile(name, &preset.profile(layout)?)?;
+    let mut cfg = paths.load_config()?;
+    for app in preset.apps {
+        cfg.apps.entry(app.to_string()).or_insert_with(|| name.to_string());
+    }
+    paths.save_config(&cfg)?;
+    notify_daemon();
+    Ok(())
+}
+
 fn bind_app(paths: &Paths, name: &str, app: &str) -> Result<()> {
     if !paths.profile(name).exists() {
         bail!("no profile named '{name}'");
@@ -295,6 +332,26 @@ fn use_profile(paths: &Paths, name: &str) -> Result<()> {
     Ok(())
 }
 
+fn rename_profile(paths: &Paths, old: &str, new: &str) -> Result<()> {
+    check_name(new)?;
+    if paths.profile(new).exists() {
+        bail!("a profile named '{new}' already exists");
+    }
+    fs::rename(paths.profile(old), paths.profile(new)).with_context(|| format!("no profile named '{old}'"))?;
+    let mut cfg = paths.load_config()?;
+    for profile in cfg.apps.values_mut().chain([&mut cfg.fallback]) {
+        if profile == old {
+            *profile = new.to_string();
+        }
+    }
+    paths.save_config(&cfg)?;
+    if paths.active().as_deref() == Some(old) {
+        paths.set_active(new)?;
+    }
+    notify_daemon();
+    Ok(())
+}
+
 fn remove_profile(paths: &Paths, name: &str) -> Result<()> {
     fs::remove_file(paths.profile(name)).with_context(|| format!("no profile named '{name}'"))?;
     let mut cfg = paths.load_config()?;
@@ -310,25 +367,18 @@ fn remove_profile(paths: &Paths, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether a process running `exe` exists, optionally one with `arg` on its command line.
-fn process_running(exe: &Path, arg: Option<&str>) -> bool {
-    let Ok(dir) = fs::read_dir("/proc") else { return false };
-    dir.filter_map(|e| e.ok()).any(|e| {
-        let p = e.path();
-        fs::read_link(p.join("exe")).is_ok_and(|link| link == exe)
-            && arg.is_none_or(|arg| {
-                fs::read(p.join("cmdline")).is_ok_and(|c| c.split(|b| *b == 0).any(|a| a == arg.as_bytes()))
-            })
-    })
-}
-
-fn daemon_running() -> bool {
-    env::current_exe().is_ok_and(|me| process_running(&me, Some("daemon")))
+/// Whether the daemon is up, judged by its name on the session bus.
+fn daemon_running(conn: Option<&zbus::blocking::Connection>) -> bool {
+    let dbus = Some("org.freedesktop.DBus");
+    conn.and_then(|c| c.call_method(dbus, "/org/freedesktop/DBus", dbus, "NameHasOwner", &(BUS_NAME,)).ok())
+        .and_then(|reply| reply.body().deserialize::<bool>().ok())
+        .unwrap_or(false)
 }
 
 /// The official driver claims the tablet for itself; both cannot run at once.
 fn vendor_driver_running() -> bool {
-    process_running(Path::new(VENDOR_BIN), None)
+    let Ok(dir) = fs::read_dir("/proc") else { return false };
+    dir.filter_map(|e| e.ok()).any(|e| fs::read_link(e.path().join("exe")).is_ok_and(|exe| exe == Path::new(VENDOR_BIN)))
 }
 
 enum Msg {
@@ -390,6 +440,7 @@ fn daemon(paths: &Paths) -> Result<()> {
     let shared = driver::Shared::new(paths.current_profile().compile());
     {
         let (shared, conn, paths, status_paths) = (shared.clone(), conn.clone(), paths.clone(), paths.clone());
+        let input_file = paths.state.join("input");
         thread::spawn(move || {
             driver::run(
                 shared,
@@ -409,6 +460,11 @@ fn daemon(paths: &Paths) -> Result<()> {
                         }
                     }
                     eprintln!("could not map the pen to {output}");
+                },
+                // Lets the settings window show which key is being pressed.
+                move |keys, dial| {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                    let _ = fs::write(&input_file, format!("{keys} {dial} {now}"));
                 },
             )
         });
@@ -489,9 +545,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::new()?;
     match cli.cmd {
-        Cmd::New { name, from, app } => {
+        Cmd::New { name, from, preset, app } => {
             paths.ensure_default()?;
-            new_profile(&paths, &name, from.as_deref(), &app)?;
+            match preset {
+                Some(preset) => {
+                    let known = || presets::PRESETS.iter().map(|p| p.name).collect::<Vec<_>>().join(", ");
+                    let preset = presets::find(&preset).with_context(|| format!("no preset named '{preset}'; there are: {}", known()))?;
+                    let (id, title) = layout::Layout::current_id(zbus::blocking::Connection::session().ok().as_ref());
+                    new_from_preset(&paths, &name, preset, &layout::Layout::load(id, title))?;
+                    for a in &app {
+                        bind_app(&paths, &name, a)?;
+                    }
+                }
+                None => new_profile(&paths, &name, from.as_deref(), &app)?,
+            }
             println!("created '{name}'");
         }
         Cmd::Bind { name, app } => {
@@ -518,7 +585,7 @@ fn main() -> Result<()> {
         }
         Cmd::Status => {
             println!("active profile: {}", paths.active().as_deref().unwrap_or("(none)"));
-            if daemon_running() {
+            if daemon_running(zbus::blocking::Connection::session().ok().as_ref()) {
                 println!("driver: running, tablet {}", paths.tablet_status());
             } else {
                 println!("driver: not running");
