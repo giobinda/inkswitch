@@ -2,7 +2,8 @@
 # Builds dist/Inkswitch.flatpak, a single-file bundle of the application.
 #
 # The prebuilt binary is packaged as it is, so no Flatpak SDK is needed: only the runtime
-# (flatpak install flathub org.freedesktop.Platform//25.08).
+# (flatpak install flathub org.freedesktop.Platform//25.08). The export checks the SVG icon with
+# gdk-pixbuf, which needs its SVG loader (librsvg2-common on Debian and Ubuntu).
 set -eu
 
 cd "$(dirname "$0")/.."
