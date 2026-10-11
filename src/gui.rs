@@ -1117,7 +1117,7 @@ impl eframe::App for App {
     }
 }
 
-pub fn run(paths: Paths) -> Result<()> {
+pub fn run(paths: Paths, edit: Option<String>) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Inkswitch")
@@ -1138,7 +1138,8 @@ pub fn run(paths: Paths) -> Result<()> {
         refreshed: None,
         outputs: Vec::new(),
         outputs_refreshed: None,
-        page: Page::Home,
+        // A profile that doesn't exist falls back to the main screen on the first refresh.
+        page: edit.map_or(Page::Home, Page::Profile),
         in_use: None,
         edit: Profile::default(),
         saved: Profile::default(),

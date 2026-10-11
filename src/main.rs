@@ -90,7 +90,11 @@ enum Cmd {
     /// Run the tablet driver and switch profiles with the focused window
     Daemon,
     /// Open the settings window
-    Gui,
+    Gui {
+        /// Open straight on the editor of this profile
+        #[arg(long)]
+        edit: Option<String>,
+    },
     /// Show what a connected tablet reports (stop the daemon first to see raw reports)
     Probe {
         /// Seconds of raw reports to print
@@ -575,7 +579,7 @@ fn test_pen() -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::new()?;
-    match cli.cmd.unwrap_or(Cmd::Gui) {
+    match cli.cmd.unwrap_or(Cmd::Gui { edit: None }) {
         Cmd::New { name, from, preset, app } => {
             paths.ensure_default()?;
             match preset {
@@ -627,9 +631,9 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Daemon => daemon(&paths)?,
-        Cmd::Gui => {
+        Cmd::Gui { edit } => {
             paths.ensure_default()?;
-            gui::run(paths)?
+            gui::run(paths, edit)?
         }
         Cmd::Probe { seconds } => driver::probe(seconds)?,
         Cmd::Setup { remove: false } => setup::install()?,

@@ -9,6 +9,10 @@ do, separately for Krita, GIMP, Blender or any other application.
 
 Inkswitch is an independent project. It is not made, endorsed or supported by XP-Pen.
 
+![The main screen: profiles as tiles, and the tablet with what each control does](docs/screenshots/profiles.png)
+
+![Editing a profile: applications, named shortcuts and the dial](docs/screenshots/editor.png)
+
 ## What it does
 
 - **Per-application profiles.** Tie a profile to an application and the tablet switches to it
@@ -133,6 +137,10 @@ accordingly.
 - The dial has one function per profile; the vendor driver's extra dial modes are not there.
 - The presets assume each application's default shortcuts.
 - If the driver stops, the pen stays dead until it is started again or the tablet is replugged.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
 
 ## Trademarks
 
