@@ -501,10 +501,15 @@ fn daemon(paths: &Paths) -> Result<()> {
             )
         });
     }
-    // Only KDE Plasma can tell us which window is in front; elsewhere profiles are picked by hand.
-    match load_kwin_script(&conn, paths) {
-        Ok(()) => eprintln!("watching window focus"),
-        Err(e) => eprintln!("profiles will not follow the focused window (this needs KDE Plasma 6): {e:#}"),
+    // Something in the desktop has to tell us which window is in front: a KWin script we load
+    // ourselves on Plasma, a shell extension on GNOME. Elsewhere profiles are picked by hand.
+    if setup::on_gnome() {
+        eprintln!("waiting for the Inkswitch GNOME Shell extension to report window focus (`inkswitch setup` installs it)");
+    } else {
+        match load_kwin_script(&conn, paths) {
+            Ok(()) => eprintln!("watching window focus"),
+            Err(e) => eprintln!("profiles will not follow the focused window (this needs KDE Plasma 6 or GNOME): {e:#}"),
+        }
     }
 
     let mut output = paths.load_config().map(|c| c.output).unwrap_or_default();
@@ -577,6 +582,9 @@ fn test_pen() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Die quietly when the reader of our output goes away (`inkswitch list | head -1`).
+    // SAFETY: called before any other thread exists; SIG_DFL is always a valid handler.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let cli = Cli::parse();
     let paths = Paths::new()?;
     match cli.cmd.unwrap_or(Cmd::Gui { edit: None }) {

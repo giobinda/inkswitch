@@ -1,0 +1,7 @@
+{
+  "uuid": "inkswitch@giobinda.github.io",
+  "name": "Inkswitch",
+  "description": "Tells the Inkswitch tablet driver which window is in front, so the tablet switches to the profile of the application you are using.",
+  "url": "https://github.com/giobinda/inkswitch",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"]
+}

@@ -18,6 +18,17 @@ const VENDOR_UDEV_RULE: &str = "/lib/udev/rules.d/10-xp-pen.rules";
 const DESKTOP_ENTRY: &str = include_str!("../packaging/inkswitch.desktop");
 const ICON: &str = include_str!("../packaging/inkswitch.svg");
 
+/// The GNOME Shell extension that reports the focused window, as KWin does on Plasma.
+const GNOME_EXTENSION: &str = "inkswitch@giobinda.github.io";
+const GNOME_EXTENSION_FILES: [(&str, &str); 2] = [
+    ("metadata.json", include_str!("../gnome-extension/inkswitch@giobinda.github.io/metadata.json")),
+    ("extension.js", include_str!("../gnome-extension/inkswitch@giobinda.github.io/extension.js")),
+];
+
+pub fn on_gnome() -> bool {
+    env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktops| desktops.split(':').any(|d| d.eq_ignore_ascii_case("gnome")))
+}
+
 /// Where this program lives: the AppImage file when run from one, not its temporary mount.
 fn program() -> Result<PathBuf> {
     match env::var_os("APPIMAGE") {
@@ -30,6 +41,7 @@ struct Files {
     unit: PathBuf,
     desktop: PathBuf,
     icon: PathBuf,
+    gnome_extension: PathBuf,
 }
 
 fn files() -> Result<Files> {
@@ -40,6 +52,7 @@ fn files() -> Result<Files> {
         unit: xdg("XDG_CONFIG_HOME", ".config").join("systemd/user").join(SERVICE),
         desktop: data.join("applications/inkswitch.desktop"),
         icon: data.join("icons/hicolor/scalable/apps/inkswitch.svg"),
+        gnome_extension: data.join("gnome-shell/extensions").join(GNOME_EXTENSION),
     })
 }
 
@@ -140,6 +153,21 @@ pub fn install() -> Result<()> {
         ),
     )?;
 
+    if on_gnome() {
+        for (name, contents) in GNOME_EXTENSION_FILES {
+            write(&files.gnome_extension.join(name), contents)?;
+        }
+        // GNOME Shell only notices a new extension when the session starts, so this fails the
+        // first time; the extension is then switched on from the Extensions app or by running
+        // setup again after logging back in.
+        let enabled = Command::new("gnome-extensions").args(["enable", GNOME_EXTENSION]).status().is_ok_and(|s| s.success());
+        if enabled {
+            println!("the GNOME Shell extension for automatic profile switching is on");
+        } else {
+            println!("installed the GNOME Shell extension for automatic profile switching: log out and back in, then run this again to switch it on");
+        }
+    }
+
     let rule_present = Path::new(UDEV_RULE_PATH).exists() || Path::new(VENDOR_UDEV_RULE).exists();
     if !rule_present && !has_device_access() {
         install_udev_rule(&files.unit.with_extension("rules"))?;
@@ -165,6 +193,7 @@ pub fn remove() -> Result<()> {
     for file in [&files.unit, &files.desktop, &files.icon] {
         let _ = fs::remove_file(file);
     }
+    let _ = fs::remove_dir_all(&files.gnome_extension);
     systemctl(&["daemon-reload"]);
     println!("removed the menu entry and the background service; profiles and settings were kept");
     if Path::new(UDEV_RULE_PATH).exists() {

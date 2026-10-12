@@ -47,10 +47,14 @@ jobs:
           fi
           tail -n 3 flatpak.log
 
+      - name: Pack the GNOME Shell extension
+        run: cd gnome-extension/inkswitch@giobinda.github.io && zip -r ../../dist/inkswitch-gnome-extension.zip .
+
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/Inkswitch-x86_64.AppImage
             dist/Inkswitch.flatpak
+            dist/inkswitch-gnome-extension.zip
           generate_release_notes: true

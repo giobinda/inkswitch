@@ -37,12 +37,14 @@ Inkswitch is an independent project. It is not made, endorsed or supported by XP
   **Only the Artist 15.6 Pro V2 has been tested.** Other models of the same generation should
   work, but the window assumes eight keys and one dial.
 - **KDE Plasma 6 on Wayland** for automatic profile switching and for choosing the pen's screen.
-  On other desktops the driver runs, and you pick the profile by hand.
+  **GNOME 45 or newer** gets automatic switching through a shell extension (see below), but has
+  not been tested with a tablet yet. On other desktops the driver runs, and you pick the profile
+  by hand.
 - systemd, to run the driver in the background (not needed for the Flatpak).
 - The official XP-Pen driver does not need to be installed. If it is, it must not be running at
   the same time: both would claim the tablet.
 
-GNOME and other desktops have not been tested yet.
+Desktops other than KDE Plasma have not been tested with a tablet yet.
 
 ## Installing
 
@@ -89,6 +91,18 @@ the Flatpak script needs `flatpak` and the `org.freedesktop.Platform//25.08` run
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) installed both link against an
 old glibc; without it the result only runs on systems as new as the one it was built on.
 
+### GNOME
+
+On GNOME, something has to tell Inkswitch which window is in front, and that is a small shell
+extension. `inkswitch setup` installs it for you; GNOME only notices a new extension at login,
+so log out and back in, then run `inkswitch setup` once more (or switch "Inkswitch" on in the
+Extensions app).
+
+The Flatpak cannot install it. Download `inkswitch-gnome-extension.zip` from the release and
+run `gnome-extensions install inkswitch-gnome-extension.zip`, log out and in, and enable it.
+
+Which screen the pen draws on is decided by GNOME's own tablet settings there.
+
 ### Uninstalling
 
 `inkswitch setup --remove` removes the background service and the menu entry and keeps your
@@ -129,8 +143,8 @@ positions, so they keep working when you change keyboard layout.
 `inkswitch daemon` claims the tablet's vendor interface over USB, switches it to full reports
 and translates them into two virtual input devices: a pen, which the desktop treats as a
 drawing tablet, and a keyboard with mouse buttons, which plays the shortcuts of the profile in
-use. A small KWin script reports the focused window over D-Bus, and the daemon switches profile
-accordingly.
+use. A small KWin script (on GNOME, a shell extension) reports the focused window over D-Bus, and
+the daemon switches profile accordingly.
 
 ## Known limits
 
