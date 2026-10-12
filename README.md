@@ -34,8 +34,8 @@ Inkswitch is an independent project. It is not made, endorsed or supported by XP
 - Linux on a 64-bit Intel or AMD machine. The prebuilt packages need glibc 2.31 or newer
   (distributions from 2020 on).
 - A tablet that speaks XP-Pen's current USB protocol (known as UGEE v2).
-  **Only the Artist 15.6 Pro V2 has been tested.** Other models of the same generation should
-  work, but the window assumes eight keys and one dial.
+  **Only the Artist 15.6 Pro V2 has been tested.** Other models are experimental, see
+  [Other tablets](#other-tablets).
 - **KDE Plasma 6 on Wayland** for automatic profile switching and for choosing the pen's screen.
   **GNOME 45 or newer** gets automatic switching through a shell extension (see below), but has
   not been tested with a tablet yet. On other desktops the driver runs, and you pick the profile
@@ -145,6 +145,25 @@ and translates them into two virtual input devices: a pen, which the desktop tre
 drawing tablet, and a keyboard with mouse buttons, which plays the shortcuts of the profile in
 use. A small KWin script (on GNOME, a shell extension) reports the focused window over D-Bus, and
 the daemon switches profile accordingly.
+
+## Other tablets
+
+Inkswitch was developed with a single tablet, the Artist 15.6 Pro V2. Support for every other
+model is **experimental and untested**: nobody has tried it yet.
+
+It is built to adapt, though. The tablet itself reports its name, its size, its pressure range
+and how many express keys it has, and the window and the drawing of the tablet follow that. A
+tablet does not say whether it has a dial, so the dial's settings appear the first time you
+turn it. The drawing is a sketch: keys down one side, the dial between them.
+
+What is likely to work: XP-Pen tablets of the current generation, with or without a screen.
+What will not: older models that use a different protocol (they are simply not found), a
+second dial or a touch strip, and more than 16 express keys.
+
+If you try another model, please report how it went, working or not, at
+<https://github.com/giobinda/inkswitch/issues>, with the output of
+`inkswitch probe --seconds 10` taken while you move the pen, press each key and turn the dial.
+That output is what is needed to make a model work properly.
 
 ## Known limits
 

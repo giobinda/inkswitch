@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+mod device;
 mod driver;
 mod gui;
 mod icons;
@@ -177,7 +178,9 @@ impl Paths {
     fn load_profile(&self, name: &str) -> Result<Profile> {
         let text = fs::read_to_string(self.profile(name)).with_context(|| format!("no profile named '{name}'"))?;
         let mut profile: Profile = toml::from_str(&text).with_context(|| format!("reading profile '{name}'"))?;
-        profile.keys.resize(settings::EXPRESS_KEYS, String::new());
+        // Tablets with more keys than usual keep theirs.
+        let keys = profile.keys.len().max(settings::EXPRESS_KEYS);
+        profile.keys.resize(keys, String::new());
         Ok(profile)
     }
 
@@ -254,6 +257,17 @@ impl Paths {
     /// The profile the driver should be using right now.
     fn current_profile(&self) -> Profile {
         self.active().and_then(|name| self.load_profile(&name).ok()).unwrap_or_default()
+    }
+
+    /// The tablet model last connected, as described by the daemon.
+    fn device(&self) -> Option<device::DeviceInfo> {
+        toml::from_str(&fs::read_to_string(self.state.join("device.toml")).ok()?).ok()
+    }
+
+    fn save_device(&self, info: &device::DeviceInfo) {
+        if let Ok(text) = toml::to_string_pretty(info) {
+            let _ = write_atomic(&self.state.join("device.toml"), &text);
+        }
     }
 
     /// Connection state as last reported by the daemon.
@@ -473,13 +487,19 @@ fn daemon(paths: &Paths) -> Result<()> {
     {
         let (shared, conn, paths, status_paths) = (shared.clone(), conn.clone(), paths.clone(), paths.clone());
         let input_file = paths.state.join("input");
+        let (connect_paths, dial_paths) = (paths.clone(), paths.clone());
         thread::spawn(move || {
             driver::run(
                 shared,
                 move |status| {
                     let _ = fs::write(status_paths.state.join("tablet"), status);
                 },
-                move |pen, _ranges| {
+                move |pen, tablet, ranges| {
+                    let info = device::DeviceInfo::new(&tablet.name, tablet.product_id, ranges.keys, connect_paths.device().as_ref());
+                    if !info.tested() {
+                        eprintln!("{} has not been tested with Inkswitch; support for it is experimental", info.name);
+                    }
+                    connect_paths.save_device(&info);
                     let output = paths.load_config().map(|c| c.output).unwrap_or_default();
                     if output.is_empty() {
                         return;
@@ -495,6 +515,12 @@ fn daemon(paths: &Paths) -> Result<()> {
                 },
                 // Lets the settings window show which key is being pressed.
                 move |keys, dial| {
+                    // A tablet does not say whether it has a dial; remember it once it is used.
+                    if dial != 0 {
+                        if let Some(info) = dial_paths.device().filter(|info| !info.dial) {
+                            dial_paths.save_device(&device::DeviceInfo { dial: true, ..info });
+                        }
+                    }
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
                     let _ = fs::write(&input_file, format!("{keys} {dial} {now}"));
                 },
@@ -549,7 +575,7 @@ fn daemon(paths: &Paths) -> Result<()> {
 /// Checks that the desktop accepts our virtual pen as a drawing tablet, without a tablet.
 fn test_pen() -> Result<()> {
     use evdev::{AbsoluteAxisCode as Abs, EventType, InputEvent, KeyCode};
-    let ranges = driver::Ranges { max_x: 69080, max_y: 38860, max_pressure: 16383, lines_per_inch: 5080 };
+    let ranges = driver::Ranges { max_x: 69080, max_y: 38860, max_pressure: 16383, lines_per_inch: 5080, keys: 8 };
     let mut pen = driver::create_pen("inkswitch test", 0, &ranges)?;
     let sysname = driver::sysname(&mut pen).context("the pen device has no event node")?;
     println!("pen device: {sysname}");

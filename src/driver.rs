@@ -104,11 +104,13 @@ pub struct Ranges {
     pub max_y: i32,
     pub max_pressure: i32,
     pub lines_per_inch: i32,
+    /// Number of express keys.
+    pub keys: usize,
 }
 
 impl Ranges {
     /// Used when the tablet doesn't tell; the pen still covers the whole screen.
-    const FALLBACK: Ranges = Ranges { max_x: 65535, max_y: 65535, max_pressure: 8191, lines_per_inch: 5080 };
+    const FALLBACK: Ranges = Ranges { max_x: 65535, max_y: 65535, max_pressure: 8191, lines_per_inch: 5080, keys: 8 };
 }
 
 /// Decodes string descriptor 100 (including its two header bytes).
@@ -123,6 +125,7 @@ pub fn parse_params(desc: &[u8]) -> Option<Ranges> {
         max_y: le16(4) | high(13),
         max_pressure: le16(8),
         lines_per_inch: le16(10),
+        keys: usize::from(desc[6]),
     };
     (r.max_x > 0 && r.max_y > 0 && r.max_pressure > 0).then_some(r)
 }
@@ -555,6 +558,8 @@ impl Session {
                         self.release(held)?;
                     }
                 }
+                // The extra pressure bit only means pressure on pens with more than 8192 levels.
+                let pressure = if self.ranges.max_pressure > 0x1fff { pressure } else { pressure & 0x1fff };
                 let raw = pressure.clamp(0, self.ranges.max_pressure) as f32 / self.ranges.max_pressure as f32;
                 self.tip = tip;
                 self.pressure = (pressure_curve(profile.pressure, raw) * self.ranges.max_pressure as f32).round() as i32;
@@ -596,7 +601,7 @@ impl Session {
 }
 
 /// Serves one tablet until it is unplugged (which surfaces as a read error).
-fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Ranges), on_aux: &dyn Fn(u16, i32)) -> Result<()> {
+fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Tablet, &Ranges), on_aux: &dyn Fn(u16, i32)) -> Result<()> {
     let usb = Usb::start(tablet)?;
     let ranges = match usb.string_descriptor(PARAMS_STRING).map(|d| parse_params(&d)) {
         Ok(Some(ranges)) => ranges,
@@ -622,7 +627,7 @@ fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Ranges), o
     };
     let pen_sysname = sysname(&mut session.pen);
     *shared.pen_sysname.lock().unwrap() = pen_sysname.clone();
-    on_connect(pen_sysname.as_deref().unwrap_or(""), &session.ranges);
+    on_connect(pen_sysname.as_deref().unwrap_or(""), tablet, &session.ranges);
 
     let mut buf = [0u8; 64];
     loop {
@@ -639,7 +644,7 @@ fn serve(tablet: &Tablet, shared: &Shared, on_connect: &dyn Fn(&str, &Ranges), o
 /// Runs forever: waits for a tablet, serves it, and starts over when it goes away.
 /// `status` is called with a line describing the connection whenever it changes, `on_aux`
 /// with the express keys held (as a bitmask) and the dial step on every such report.
-pub fn run(shared: Arc<Shared>, status: impl Fn(&str), on_connect: impl Fn(&str, &Ranges), on_aux: impl Fn(u16, i32)) -> ! {
+pub fn run(shared: Arc<Shared>, status: impl Fn(&str), on_connect: impl Fn(&str, &Tablet, &Ranges), on_aux: impl Fn(u16, i32)) -> ! {
     status("not connected");
     loop {
         let Some(tablet) = find_tablet() else {
@@ -728,7 +733,7 @@ mod tests {
     fn params() {
         // As reported by an Artist 15.6 Pro V2.
         let desc = [0x0e, 0x03, 0x67, 0x0a, 0xff, 0x95, 0x08, 0x00, 0xff, 0x3f, 0xd8, 0x13, 0x01, 0x00];
-        assert_eq!(parse_params(&desc), Some(Ranges { max_x: 68199, max_y: 38399, max_pressure: 16383, lines_per_inch: 5080 }));
+        assert_eq!(parse_params(&desc), Some(Ranges { max_x: 68199, max_y: 38399, max_pressure: 16383, lines_per_inch: 5080, keys: 8 }));
         assert_eq!(parse_params(&[4, 3, 0, 0]), None);
     }
 }

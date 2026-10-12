@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use eframe::egui;
 
+use super::device::DeviceInfo;
 use super::icons::IconIndex;
 use super::layout::Layout;
 use super::presets::PRESETS;
@@ -37,6 +38,8 @@ struct Snapshot {
     profiles: Vec<String>,
     cfg: Config,
     active: Option<String>,
+    /// The tablet model last connected; `None` before any was.
+    device: Option<DeviceInfo>,
     last_used: BTreeMap<String, u128>,
     recent: Vec<(String, String)>,
     daemon: bool,
@@ -207,12 +210,33 @@ fn chord_storage_text(chord: &Chord) -> String {
 impl App {
     fn slot_text(&mut self, slot: Slot) -> &mut String {
         match slot {
-            Slot::Key(i) => &mut self.edit.keys[i],
+            Slot::Key(i) => {
+                // Tablets with more keys than the profile was made for.
+                if self.edit.keys.len() <= i {
+                    self.edit.keys.resize(i + 1, String::new());
+                }
+                &mut self.edit.keys[i]
+            }
             Slot::DialCw => &mut self.edit.dial_cw,
             Slot::DialCcw => &mut self.edit.dial_ccw,
             Slot::PenButton1 => &mut self.edit.pen_button1,
             Slot::PenButton2 => &mut self.edit.pen_button2,
         }
+    }
+
+    /// How many express keys to show: the tablet's, or the usual eight before one was seen.
+    fn key_count(&self) -> usize {
+        self.snap.device.as_ref().map_or(8, |d| d.keys.min(16))
+    }
+
+    /// Whether the tablet is known to have a dial (assumed before one was seen).
+    fn has_dial(&self) -> bool {
+        self.snap.device.as_ref().is_none_or(|d| d.dial)
+    }
+
+    /// The connected tablet, if it is a model Inkswitch has not been tested with.
+    fn untested_device(&self) -> Option<&DeviceInfo> {
+        self.snap.device.as_ref().filter(|d| !d.tested())
     }
 
     fn say(&mut self, is_error: bool, text: impl Into<String>) {
@@ -246,6 +270,7 @@ impl App {
             profiles: p.profile_names().unwrap_or_default(),
             cfg,
             active: p.active(),
+            device: p.device(),
             last_used: p.last_used(),
             recent: p.recent_windows(),
             daemon: daemon_running(self.conn.as_ref()),
@@ -425,7 +450,7 @@ impl App {
                 }
                 return;
             }
-            let current = self.slot_text(slot).clone();
+            let current = slot.action(&self.edit).to_string();
             let (shown, hint) = self.describe(&current);
             let is_empty = matches!(parse_action(&current), Ok(Action::None));
             let mut text = egui::RichText::new(shown);
@@ -633,23 +658,39 @@ impl App {
     fn overview(&self, ui: &mut egui::Ui) {
         let Some((name, profile)) = &self.in_use else { return };
         card(ui, &format!("{name}: what the tablet does now"), |ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 340.0), egui::Sense::hover());
+            // The controls down the tablet's side, top to bottom. A dial sits between the two
+            // halves of an even number of keys, as on the tablets that have one, else on top.
+            #[derive(Clone, Copy)]
+            enum Control {
+                Key(usize),
+                Dial(bool),
+            }
+            let keys = self.key_count();
+            let mut controls: Vec<Control> = (0..keys).map(Control::Key).collect();
+            if self.has_dial() {
+                let at = if keys % 2 == 0 { keys / 2 } else { 0 };
+                controls.splice(at..at, [Control::Dial(true), Control::Dial(false)]);
+            }
+            let rows = controls.len();
+            let height = (rows as f32 * 30.0 + 40.0).max(340.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
             let painter = ui.painter_at(rect);
             let visuals = ui.visuals();
             let (strong, weak) = (visuals.strong_text_color(), visuals.weak_text_color());
             let (name_font, detail_font) = (egui::FontId::proportional(15.0), egui::FontId::proportional(12.5));
             let line = egui::Stroke::new(1.0_f32, weak);
 
-            // The tablet: a body with a strip of controls on its left and the screen beside it.
-            let labels_width = (rect.width() * 0.45).min(360.0);
+            // The tablet: a body with a strip of controls on its left and the drawing area beside it.
+            let labels_width = if rows == 0 { 0.0 } else { (rect.width() * 0.45).min(360.0) };
             let body = egui::Rect::from_min_max(rect.left_top() + egui::vec2(labels_width, 4.0), rect.right_bottom() - egui::vec2(4.0, 4.0));
             painter.rect_filled(body, 18, egui::Color32::from_gray(48));
-            let strip = 56.0;
+            let strip = if rows == 0 { 12.0 } else { 56.0 };
             let screen = egui::Rect::from_min_max(body.left_top() + egui::vec2(strip + 4.0, 16.0), body.right_bottom() - egui::vec2(16.0, 16.0));
-            painter.rect_filled(screen, 6, visuals.extreme_bg_color);
+            // A screen is dark glass; a tablet without one has a plain drawing surface.
+            let has_screen = self.snap.device.as_ref().is_none_or(|d| d.display);
+            painter.rect_filled(screen, 6, if has_screen { visuals.extreme_bg_color } else { egui::Color32::from_gray(62) });
 
-            // Ten rows down the strip: four keys, the dial taking two, four keys.
-            let row_height = (body.height() - 28.0) / 10.0;
+            let row_height = (body.height() - 28.0) / rows.max(1) as f32;
             let row_y = |row: usize| body.top() + 14.0 + row_height * (row as f32 + 0.5);
             let strip_x = body.left() + strip / 2.0 + 2.0;
             let label_x = body.left() - 26.0;
@@ -665,19 +706,25 @@ impl App {
                 }
                 painter.line_segment([egui::pos2(label_x + 8.0, row_y(row)), egui::pos2(target_x, row_y(row))], line);
             };
-            for key in 0..8 {
-                let row = if key < 4 { key } else { key + 2 };
-                let cap = egui::Rect::from_center_size(egui::pos2(strip_x, row_y(row)), egui::vec2(30.0, row_height - 9.0));
-                let lit = self.held_keys & (1 << key) != 0;
-                painter.rect_filled(cap, 4, if lit { GREEN } else { egui::Color32::from_gray(120) });
-                label(row, Slot::Key(key), None, cap.left() - 4.0);
+            let radius = (row_height * 0.72).min(22.0);
+            for (row, control) in controls.iter().enumerate() {
+                match *control {
+                    Control::Key(key) => {
+                        let cap = egui::Rect::from_center_size(egui::pos2(strip_x, row_y(row)), egui::vec2(30.0, (row_height - 9.0).min(24.0)));
+                        let lit = self.held_keys & (1 << key) != 0;
+                        painter.rect_filled(cap, 4, if lit { GREEN } else { egui::Color32::from_gray(120) });
+                        label(row, Slot::Key(key), None, cap.left() - 4.0);
+                    }
+                    // The dial is drawn once, between its two rows.
+                    Control::Dial(true) => {
+                        let centre = egui::pos2(strip_x, (row_y(row) + row_y(row + 1)) / 2.0);
+                        let color = if self.dial_step != 0 { GREEN } else { egui::Color32::from_gray(120) };
+                        painter.circle_stroke(centre, radius, egui::Stroke::new(5.0_f32, color));
+                        label(row, Slot::DialCw, Some("dial clockwise"), strip_x - radius - 6.0);
+                    }
+                    Control::Dial(false) => label(row, Slot::DialCcw, Some("dial counter-clockwise"), strip_x - radius - 6.0),
+                }
             }
-            let dial = egui::pos2(strip_x, (row_y(4) + row_y(5)) / 2.0);
-            let radius = row_height * 0.72;
-            let dial_color = if self.dial_step != 0 { GREEN } else { egui::Color32::from_gray(120) };
-            painter.circle_stroke(dial, radius, egui::Stroke::new(5.0_f32, dial_color));
-            label(4, Slot::DialCw, Some("dial clockwise"), dial.x - radius - 6.0);
-            label(5, Slot::DialCcw, Some("dial counter-clockwise"), dial.x - radius - 6.0);
 
             // The pen's two buttons, written on the screen.
             let mut at = screen.left_top() + egui::vec2(18.0, 16.0);
@@ -692,6 +739,9 @@ impl App {
                 }
             }
             ui.weak("Press a key on the tablet to see it light up. Use Edit on the profile to change or name what the keys do.");
+            if self.untested_device().is_some() {
+                ui.weak("This drawing is a sketch made from what the tablet reports; the real layout of yours may differ.");
+            }
         });
     }
 
@@ -729,6 +779,17 @@ impl App {
             }
         });
         ui.add_space(14.0);
+        if let Some(device) = self.untested_device() {
+            let name = device.name.clone();
+            egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.0_f32, ui.visuals().warn_fg_color)).corner_radius(8).inner_margin(12).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.colored_label(ui.visuals().warn_fg_color, egui::RichText::new(format!("Experimental: {name} has not been tested")).strong());
+                ui.label("Inkswitch was developed with one tablet model. Others of the same generation should work, but the pen, keys or dial may misbehave.");
+                ui.label("If something is wrong, run  inkswitch probe --seconds 10  in a terminal while using the tablet and report the output:");
+                ui.hyperlink("https://github.com/giobinda/inkswitch/issues");
+            });
+            ui.add_space(10.0);
+        }
         self.overview(ui);
         match action {
             Some(TileAction::Use(name)) => self.run(format!("Now using '{name}'"), |p| use_profile(p, &name)),
@@ -997,27 +1058,36 @@ impl App {
             return;
         }
         card(ui, "Applications", |ui| self.applications(ui, name));
-        card(ui, "Express keys", |ui| {
-            ui.label("Click a shortcut to change it. Press a key on the tablet and it lights up here.");
-            ui.weak("The first field is a name for what the key does, such as Undo. It is shown on the overview; without one the shortcut is shown.");
-            ui.weak("A shortcut stays held for as long as you hold the key, so a key set to Ctrl or Space works like the real one.");
-            ui.weak("Mouse clicks land where the pen is while it is over the tablet, otherwise at the mouse pointer.");
-            ui.add_space(4.0);
-            egui::Grid::new("keys").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-                for i in 0..self.edit.keys.len() {
-                    let lit = self.held_keys & (1 << i) != 0;
-                    self.shortcut_row(ui, &format!("Key {}", i + 1), Slot::Key(i), lit);
-                }
+        let keys = self.key_count();
+        if keys > 0 {
+            card(ui, "Express keys", |ui| {
+                ui.label("Click a shortcut to change it. Press a key on the tablet and it lights up here.");
+                ui.weak("The first field is a name for what the key does, such as Undo. It is shown on the overview; without one the shortcut is shown.");
+                ui.weak("A shortcut stays held for as long as you hold the key, so a key set to Ctrl or Space works like the real one.");
+                ui.weak("Mouse clicks land where the pen is while it is over the tablet, otherwise at the mouse pointer.");
+                ui.add_space(4.0);
+                egui::Grid::new("keys").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+                    for i in 0..keys {
+                        let lit = self.held_keys & (1 << i) != 0;
+                        self.shortcut_row(ui, &format!("Key {}", i + 1), Slot::Key(i), lit);
+                    }
+                });
             });
-        });
-        card(ui, "Dial", |ui| {
-            ui.label("Each click of the dial presses the shortcut once.");
-            ui.add_space(4.0);
-            egui::Grid::new("dial").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-                self.shortcut_row(ui, "Clockwise", Slot::DialCw, self.dial_step == 1);
-                self.shortcut_row(ui, "Counter-clockwise", Slot::DialCcw, self.dial_step == -1);
+        }
+        if self.has_dial() {
+            card(ui, "Dial", |ui| {
+                ui.label("Each click of the dial presses the shortcut once.");
+                ui.add_space(4.0);
+                egui::Grid::new("dial").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+                    self.shortcut_row(ui, "Clockwise", Slot::DialCw, self.dial_step == 1);
+                    self.shortcut_row(ui, "Counter-clockwise", Slot::DialCcw, self.dial_step == -1);
+                });
             });
-        });
+        } else {
+            card(ui, "Dial", |ui| {
+                ui.weak("This tablet has not shown a dial yet. If it has one, turn it once and its settings appear here.");
+            });
+        }
         card(ui, "Pen", |ui| {
             ui.label("Left as “Pen button”, each application decides what the button does (usually middle and right click).");
             ui.add_space(4.0);
